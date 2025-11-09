@@ -1,42 +1,48 @@
-const functions = require('firebase-functions');
 const { GoogleGenAI } = require('@google/genai');
 
-// 1. Получаем секретный ключ из конфигурации Firebase
-const geminiKey = functions.config().gemini.key;
+// Ключ берется из переменных окружения Vercel (GEMINI_API_KEY)
+const geminiKey = process.env.GEMINI_API_KEY;
 
-// 2. Инициализируем Gemini с нашим секретным ключом
+// Инициализируем Gemini
 const ai = new GoogleGenAI({ apiKey: geminiKey });
 
-// --- Главная функция: "Посредник" ---
-// Она принимает HTTP-запрос от браузера и отвечает ему
-exports.getNutritionAdvice = functions.https.onCall(async (data, context) => {
+// Главный HTTP-обработчик для Vercel
+module.exports = async (req, res) => {
+    // Устанавливаем заголовки CORS (ОЧЕНЬ ВАЖНО, чтобы разрешить запросы с нашего сайта)
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-    // Проверка: Убедимся, что пользователь вошел в Firebase
-    if (!context.auth) {
-        throw new functions.https.HttpsError('unauthenticated', 'Требуется аутентификация для доступа к Gemini API.');
+    // Обработка OPTIONS-запросов (предварительная проверка браузером)
+    if (req.method === 'OPTIONS') {
+        return res.status(204).end();
     }
 
-    // Получаем промт (запрос) от app.js
-    const prompt = data.prompt;
-
-    if (!prompt) {
-        throw new new functions.https.HttpsError('invalid-argument', 'Отсутствует текст запроса (prompt).');
+    if (req.method !== 'POST') {
+        return res.status(405).json({ error: 'Method Not Allowed' });
     }
 
     try {
-        // Вызываем модель Gemini с полученным промтом
+        // Получаем промт из тела запроса
+        const prompt = req.body.prompt;
+
+        if (!prompt) {
+            return res.status(400).json({ error: 'Missing prompt in request body' });
+        }
+
+        // Вызываем модель Gemini
         const response = await ai.models.generateContent({
             model: 'gemini-2.5-flash',
             contents: [{ role: "user", parts: [{ text: prompt }] }],
         });
 
-        // Возвращаем чистый текст ответа обратно в app.js
-        return {
+        // Отправляем чистый ответ обратно
+        res.status(200).json({
             text: response.text,
-        };
+        });
 
     } catch (error) {
         console.error("Gemini API Error:", error);
-        throw new functions.https.HttpsError('internal', 'Произошла ошибка при обращении к Gemini API.');
+        res.status(500).json({ error: 'Internal server error while calling Gemini API' });
     }
-});
+};
