@@ -8,8 +8,13 @@ const ai = new GoogleGenAI({ apiKey: geminiKey });
 
 // Главный HTTP-обработчик для Vercel
 module.exports = async (req, res) => {
-    // Устанавливаем заголовки CORS (ОЧЕНЬ ВАЖНО, чтобы разрешить запросы с нашего сайта)
-    res.setHeader('Access-Control-Allow-Origin', '*');
+
+    // === ВОТ ИСПРАВЛЕНИЕ ===
+    // Вместо '*' мы указываем ТОЛЬКО ваш сайт.
+    const allowedOrigin = 'https://analyzer.лучшее-и-люди.рф';
+    res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
+    // =========================
+
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
