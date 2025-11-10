@@ -10,8 +10,8 @@ const ai = new GoogleGenAI({ apiKey: geminiKey });
 module.exports = async (req, res) => {
     
     // === ФИНАЛЬНОЕ ИСПРАВЛЕНИЕ ===
-    // Используем "техническое" (Punycode) имя вашего сайта
-    const allowedOrigin = 'https://analyzer.xn----7sbbg5amc2a4a7e.xn--p1ai';
+    // Мы указываем "шифр" (Punycode) вашего домена.
+    const allowedOrigin = 'https://analyzer.xn----8sba0c1a2a.xn--p1ai';
     res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
     // =========================
 
