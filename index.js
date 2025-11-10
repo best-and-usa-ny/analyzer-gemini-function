@@ -8,10 +8,10 @@ const ai = new GoogleGenAI({ apiKey: geminiKey });
 
 // Главный HTTP-обработчик для Vercel
 module.exports = async (req, res) => {
-
-    // === ВОТ ИСПРАВЛЕНИЕ ===
-    // Вместо '*' мы указываем ТОЛЬКО ваш сайт.
-    const allowedOrigin = 'https://analyzer.лучшее-и-люди.рф';
+    
+    // === ФИНАЛЬНОЕ ИСПРАВЛЕНИЕ ===
+    // Используем "техническое" (Punycode) имя вашего сайта
+    const allowedOrigin = 'https://analyzer.xn----7sbbg5amc2a4a7e.xn--p1ai';
     res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
     // =========================
 
