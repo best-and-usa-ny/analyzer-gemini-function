@@ -3,8 +3,8 @@ const { GoogleGenerativeAI } = require("@google/generative-ai");
 // Обработчик для Vercel
 module.exports = async (req, res) => {
     // --- (ВАЖНО!) НАСТРОЙКА CORS ---
-    // Разрешаем вашему сайту делать запросы
-    res.setHeader('Access-Control-Allow-Origin', 'https_analyzer.лучшее-и-люди.рф'); 
+    // Разрешаем ТОЛЬКО вашему сайту делать запросы
+    res.setHeader('Access-Control-Allow-Origin', 'https://analyzer.лучшее-и-люди.рф'); 
     // Разрешаем методы
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
     // Разрешаем заголовки
