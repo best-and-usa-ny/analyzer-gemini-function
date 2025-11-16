@@ -32,9 +32,8 @@ function buildFinalPrompt(userData) {
     const { goal, dailyFact, dailyTarget, glHistory = {}, meals } = userData;
     const formattedMeals = formatMeals(meals);
 
-    // (ИСПРАВЛЕНО) Мы больше не делаем расчет воды здесь.
     // Мы доверяем `dailyFact.water`, который присылает app.js
-    // (после Шага 1, app.js присылает корректную, полную сумму)
+    // (app.js теперь присылает корректную, полную сумму)
 
     return `[[1. РОЛЬ И ПЕРСОНА (Кто ты)]
 Ты - Андрей Солдатенко, опытный нутрициолог с 15-летним стажем, основатель компании Best&People.
@@ -250,7 +249,8 @@ export default async function handler(req, res) {
         // 4. Инициализируем Gemini
         const genAI = new GoogleGenerativeAI(apiKey);
         const model = genAI.getGenerativeModel({
-            model: "gemini-1.5-flash" // (ИСПРАВЛЕНО) Используем 1.5-flash для более новых данных, если 2.5 недоступен
+            // (ИСПРАВЛЕНО) Возвращаем рабочую модель, которая была изначально
+            model: "gemini-2.5-flash" 
         });
 
         // 5. Отправляем промпт в Gemini
