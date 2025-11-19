@@ -6,21 +6,23 @@ export const config = {
     api: { bodyParser: true },
 };
 
-// Retry с экспоненциальной задержкой
+// --- Функция задержки ---
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
+// --- Функция "Агрессивного Дозвона" (усилена до 6 попыток) ---
 async function callGeminiWithRetry(model, prompt, retries = 6) {
-    let delay = 1500;
+    let delay = 2000;
     for (let i = 0; i < retries; i++) {
         try {
             const result = await model.generateContent(prompt);
             return result.response.text();
         } catch (err) {
-            if (err.message.includes('503') || err.message.includes('429') || err.message.includes('overloaded')) {
+            const isOverloaded = err.message.includes('503') || err.message.includes('overloaded') || err.message.includes('429');
+            if (isOverloaded) {
                 if (i === retries - 1) throw err;
-                console.warn(`Gemini перегружен. Попытка ${i + 1}/${retries}`);
+                console.warn(`Gemini перегружен. Попытка ${i + 1}. Ждем...`);
                 await sleep(delay);
-                delay = Math.min(delay * 1.7, 10000);
+                delay *= 1.5;
                 continue;
             }
             throw err;
@@ -28,76 +30,121 @@ async function callGeminiWithRetry(model, prompt, retries = 6) {
     }
 }
 
-// Форматирование приёмов (только для промпта, не в ответе)
-function formatMeals(meals) {
-    if (!meals || Object.keys(meals).length === 0) return 'Приёмы пищи не добавлены.';
-    let text = '';
-    for (const key in meals) {
-        const m = meals[key];
-        text += `\n**${m.name}**:\n`;
-        if (m.items?.length > 0) {
-            m.items.forEach(item => {
-                text += `- ${item.name} (${Math.round(item.grams)}г, К:${Math.round(item.calories)} Б:${Math.round(item.proteins)} Ж:${Math.round(item.fats)} У:${Math.round(item.carbs)})\n`;
+// --- Форматирование списка продуктов ---
+function formatMealsForPrompt(meals) {
+    if (!meals || Object.keys(meals).length === 0) return 'Приемы пищи не записаны.';
+    let mealSummary = '';
+    for (const mealKey in meals) {
+        const meal = meals[mealKey];
+        mealSummary += `\n[ПРИЕМ ПИЩИ: ${meal.name}]\n`;
+        if (meal.items && meal.items.length > 0) {
+            meal.items.forEach(item => {
+                mealSummary += `   - Продукт: ${item.name} | Вес: ${Math.round(item.grams)}г | КБЖУ: ${Math.round(item.calories)}/${Math.round(item.proteins)}/${Math.round(item.fats)}/${Math.round(item.carbs)}\n`;
             });
         } else {
-            text += `- Нет продуктов\n`;
+            mealSummary += `   - (Пустой прием пищи)\n`;
         }
     }
-    return text;
+    return mealSummary;
 }
 
-// Словарь целей и стратегий (из 1.txt)
-function getGoalInfo(goalCode) {
-    const goals = {
-        lose: { title: 'снижение веса', strategy: 'Главный враг - инсулин вечером. Пропуск полдника = срыв. Фокус на дефицит калорий без потери мышц.' },
-        gain: { title: 'набор мышечной массы', strategy: 'Профицит калорий и белка. Есть каждые 3 часа. Акцент на строительный материал для ДНК.' },
-        maintain: { title: 'поддержание формы', strategy: 'Баланс БЖУ. Удержание веса сложнее, чем сброс. Избегать скачков сахара.' },
-        diabetes1: { title: 'сахарный диабет 1 типа', strategy: 'Строгий контроль ХЕ. Никаких быстрых углеводов. Сглаживать инсулиновые пики.' },
-        diabetes2: { title: 'сахарный диабет 2 типа', strategy: 'Низкая Гликемическая Нагрузка. Убираем скачки сахара. Фокус на It's Fiber для стабилизации.' },
-        no_gallbladder: { title: 'отсутствие желчного пузыря', strategy: 'Дробное питание (5-6 раз). Желчь течет постоянно, нельзя голодать! Избегать застоя.' },
-        gallstones: { title: 'желчнокаменная болезнь', strategy: 'Регулярный отток желчи. Жиры нужны, но правильные. Горечи и травы для предотвращения камней.' },
-        gi_issues: { title: 'проблемы с ЖКТ', strategy: 'Щадящее питание. Aloe Vera - база для заживления. Избегать раздражителей.' },
-        pregnancy: { title: 'беременность / лактация', strategy: 'Баланс для мамы и ребенка. Дополнительный белок и клетчатка. Избегать токсинов.' },
-        app: { title: 'антипаразитарная программа', strategy: 'СТОП: Сахар, Молоко, Дрожжи, Глютен. Иначе кормим паразитов. Фокус на выведение токсинов.' },
-        anticandida: { title: 'антикандидный протокол', strategy: 'Аналогично АПП. Грибки любят сладкое и мучное. Очищение с Detox Gentle.' },
-        keto_lchf: { title: 'кето / LCHF', strategy: 'Низкие углеводы, высокие жиры. Поддерживать кетоз. Вода критично для метаболизма.' },
-        vegan_veg: { title: 'веганство / вегетарианство', strategy: 'Полноценный белок из растений. Дополнять Shape vegan. Избегать дефицита.' }
+// --- БАЗА СТРАТЕГИЙ ПО ЦЕЛЯМ (СЕРДЦЕ ЛОГИКИ) ---
+function getGoalStrategy(goalCode) {
+    const strategies = {
+        // Управление весом
+        'lose': `СТРАТЕГИЯ: СНИЖЕНИЕ ВЕСА.
+        * Главный враг: Инсулиновые пики и голод вечером.
+        * Правило пропусков: Нельзя пропускать полдник (16:00), иначе будет срыв на ужин.
+        * Акцент B&P: Коктейли Shape вместо ужина для дефицита калорий.`,
+        'maintain': `СТРАТЕГИЯ: ПОДДЕРЖАНИЕ ФОРМЫ.
+        * Главный враг: Дисбаланс БЖУ.
+        * Акцент: Баланс обычной еды и продуктов B&P для удобства.`,
+        'gain': `СТРАТЕГИЯ: НАБОР МАССЫ.
+        * Главный враг: Дефицит калорий и белка.
+        * Правило: Есть каждые 3 часа. B&P продукты идут ДОПОЛНИТЕЛЬНО к еде, а не вместо.`,
+        
+        // Здоровье
+        'diabetes1': `СТРАТЕГИЯ: САХАРНЫЙ ДИАБЕТ 1 ТИПА.
+        * ВАЖНО: Строгий подсчет ХЕ (Хлебных Единиц).
+        * Анализ: Следи за углеводами. Предупреждай о продуктах с высоким ГИ.
+        * Рекомендация: It's Fiber для снижения скачков сахара.`,
+        'diabetes2': `СТРАТЕГИЯ: САХАРНЫЙ ДИАБЕТ 2 ТИПА / ИНСУЛИНОРЕЗИСТЕНТНОСТЬ.
+        * ВАЖНО: Контроль Гликемической Нагрузки (ГН).
+        * Запреты: Сахар, белая мука, перекусы фруктами без белка.
+        * Акцент B&P: Овощные супы, несладкие коктейли, It's Fiber.`,
+        'no_gallbladder': `СТРАТЕГИЯ: НЕТ ЖЕЛЧНОГО ПУЗЫРЯ.
+        * КРИТИЧЕСКИ ВАЖНО: Дробное питание (5-6 раз). Желчь течет постоянно!
+        * Опасность: Голодание = ожог слизистой. Большие порции жирного = диарея/боль.
+        * Решение: Маленькие порции часто. Пюре Re:Balance и супы B&P — идеальны, так как легкие для усвоения.`,
+        'gallstones': `СТРАТЕГИЯ: ЖЕЛЧНОКАМЕННАЯ БОЛЕЗНЬ (ЖКБ).
+        * ВАЖНО: Регулярный отток желчи. Не делать больших перерывов (>4 часов).
+        * Запреты: Жирное/жареное. Рекомендация: Горечи (Herbal Mix) для оттока.`,
+        'gi_issues': `СТРАТЕГИЯ: ЗДОРОВЬЕ ЖКТ.
+        * ВАЖНО: Щадящее питание. Aloe Vera — база для заживления слизистой.
+        * Запреты: Грубая пища в обострении. Рекомендация: Пюре и супы B&P.`,
+        'app': `СТРАТЕГИЯ: АНТИПАРАЗИТАРНАЯ ПРОГРАММА (АПП).
+        * ЖЕСТКИЙ ЗАПРЕТ: Сахар, Молоко, Дрожжи, Глютен. Иначе кормим паразитов!
+        * Акцент: Очищение (Aloe Vera, Drain). Каша Detox Gentle — личная история спасения.`,
+        'anticandida': `СТРАТЕГИЯ: АНТИКАНДИДНЫЙ ПРОТОКОЛ.
+        * ЖЕСТКИЙ ЗАПРЕТ: Сладкое, Мучное. Грибки любят сахар!
+        * Акцент: Очищение (Aloe Vera, Drain). Каша Detox Gentle — для микрофлоры.`
     };
-    return goals[goalCode] || goals['lose'];
+    return strategies[goalCode] || strategies['lose'];
 }
 
-// Промпт с полной базой и стратегиями
-function buildPrompt(userData) {
-    const { goal, dailyFact, dailyTarget, glHistory = {}, meals = {} } = userData;
-    const formattedMeals = formatMeals(meals);
-    const goalInfo = getGoalInfo(goal);
+// --- БАЗА ЗНАНИЙ О ПРОДУКТАХ B&P ---
+function getProductKnowledgeBase() {
+    return `БАЗА ПРОДУКТОВ BEST&PEOPLE:
+* Aloe Vera Smart Food: Очищение ЖКТ. 150-200 мл натощак. Для всех целей — база. При ЖКТ проблемах — заживляет слизистую.
+* Shape Smart Food: Коктейль. Чистый белок (изолят). Замена приема пищи. Для похудения — вечерний дефицит. Для диабета — низкий ГИ.
+* Detox Gentle: Каша (Яблочный пирог). Клетчатка + витамины. Для АПП/Антикандида — личная история спасения (рассказать).
+* It's Fiber: Клетчатка (Яблоко-Корица). Для диабета — сглаживает сахар. Режимы: 1 (профилактика), 2 (запоры), 3 (SOS).
+* Пюре Re:Balance: Легкий обед. Для без желчного — мягкая текстура, не нагружает.
+* Herbal Mix: Горечи для желчи. Для ЖКБ — отток желчи.`;
+}
 
-    return `Ты - Андрей Солдатенко, нутрициолог с 20-летним стажем, основатель Best&People. Обращайся исключительно на "Вы", стиль - строгий, профессиональный, честный, уважительный.
+// --- Сборка Промпта (МОЗГ СИСТЕМЫ) ---
+function buildAnalysisPrompt(userData) {
+    const { goal, dailyFact, dailyTarget, meals } = userData;
+    const goalStrategy = getGoalStrategy(goal);
+    const formattedMeals = formatMealsForPrompt(meals);
+    const productBase = getProductKnowledgeBase();
 
-ВХОДНЫЕ ДАННЫЕ
-Цель: ${goalInfo.title} (стратегия: ${goalInfo.strategy})
-Факт: Калории ${dailyFact.calories}, Белки ${dailyFact.proteins}г, Жиры ${dailyFact.fats}г, Углеводы ${dailyFact.carbs}г, Клетчатка ${dailyFact.fiber}г, Вода ${dailyFact.water}мл, ГН ${dailyFact.gl || '-'}.
-Цель: Калории ${dailyTarget.calories}, Белки ${dailyTarget.proteins}г, Жиры ${dailyTarget.fats}г, Углеводы ${dailyTarget.carbs}г, Клетчатка ${dailyTarget.fiber}г, Вода ${dailyTarget.water}мл.
-Динамика ГН: неделя ${glHistory.week || '-'}, 2 недели ${glHistory.twoWeeks || '-'}, 5 недель ${glHistory.fiveWeeks || '-'}.
-Приёмы: ${formattedMeals}
+    return `ТЫ — Андрей Солдатенко, нутрициолог (20 лет), основатель Best&People.
+СТИЛЬ: Уважительный ("Вы"), уверенный, наставнический. Не робот. Говори просто о сложном.
 
-БАЗА ЗНАНИЙ
-Продукты B&P - умная еда, технологии сохранения пользы (как у космонавтов или детского питания, упоминать только если нужно закрыть возражение). Белок - ДНК, строительный материал. Скачки сахара: быстрые углеводы вызывают впрыск инсулина, излишки в жир. Клеточный голод: люди приучили желудок, но клетки недополучают, рождают больные. Шлаки: в межклеточном пространстве (70-100 трлн клеток, отходы жизнедеятельности), вода моет клетки. Застой желчи: горечи, травы. Идеальный завтрак: 3 шага - 1. Очищение (Aloe Vera/Drain), 2. Питание (Shape/Detox Gentle), 3. Энергия (Herbal Mix) - адаптировать к цели.
+ФИЛОСОФИЯ:
+* Обычная еда — пустая (истощенные почвы).
+* B&P — умная еда (технологии сохранения пользы, как у космонавтов).
+* Вода — душ для клеток (чай/пиво — не вода).
 
-Полная база продуктов B&P с КБЖУ, составами, способами (используй точно в рекомендациях):
-- It's Fiber (Яблоко-Корица): К:210, Б:4, Ж:1, У:46.3, Клетч:84. Порция 10г. Состав: яблоко порошок, полидекстроза... [полный состав из документа]. Приготовление: 10г + 250мл воды, размешать. Режимы: 1-профилактика (10г вечером), 2-восстановление (5г 1-4 дня, потом 10г), 3-SOS (10г в 350-400мл + 250мл воды).
-- Пюре Re:Balance (С Беконом): К:363.3, Б:32, Ж:5.3, У:46.8, Клетч:10. Порция 30г. Состав: картофельные хлопья, изолят соевого белка... [полный]. Приготовление: 30г + 120-150мл воды 65-85°C, размешать, настоять 2-3 мин.
-- [добавьте все остальные продукты из вашего документа аналогично, без truncation - полный текст]
+ВХОДНЫЕ ДАННЫЕ:
+* Цель: "${goalStrategy}"
+* Факт: Калории:$$ {dailyFact.calories}, Белки: $${dailyFact.proteins}, Жиры:$$ {dailyFact.fats}, Углеводы: $${dailyFact.carbs}, Клетчатка:$$ {dailyFact.fiber}, Вода: $${dailyFact.water} мл.
+* Цель: Калории:$$ {dailyTarget.calories}, Белки: $${dailyTarget.proteins}, Жиры:$$ {dailyTarget.fats}, Углеводы: $${dailyTarget.carbs}, Клетчатка:$$ {dailyTarget.fiber}, Вода: $${dailyTarget.water} мл.
+* Приемы пищи: ${formattedMeals}
+* База продуктов: ${productBase}
 
-СТРУКТУРА ОТВЕТА (строго, без скобок, перечислений продуктов/КБЖУ в тексте - только в рекомендациях примеры; ЗАПРЕЩЕНО писать коды вроде "lose", только русские названия; ЗАПРЕЩЕНО упоминать "порошки" заранее):
-1. Персональные рекомендации от Андрея Солдатенко
-2. Краткий обзор КБЖУ, ГН, воды (связать с целью/стратегией, риски: для снижения веса - профицит ведет к набору, дефицит воды - отеки, шлаки в межклеточном пространстве).
-3. Золотой стандарт (идеальный завтрак 3 шага, адаптировать к цели; полдник 16:00-17:00 - биологические часы усвоения, дать максимум хорошего для тела по стратегии).
-4. Пошаговый разбор каждого приёма (Завтрак, Второй завтрак, Обед, Полдник, Ужин, Перекусы): Что хорошо/плохо (связать с целью, клеточный голод, инсулин, шлаки); Ошибки (риски для цели по стратегии); МЕТОД ДВУХ ПУТЕЙ: Вариант 1 - обычная еда (примеры с КБЖУ, почему для цели, покажи сложно/долго); Вариант 2 - B&P (название, порция, КБЖУ, почему для цели, удобно/эффективно). Если нет - предложить добавить по стратегии.
-5. Итоговые рекомендации на завтра (меню с вариантами 1-2, прогноз для цели: минус 0.5-1 кг для снижения веса).
-6. Мотивация (каждый кусок - лекарство или нагрузка; выбирайте мудро).
+ЗАДАЧА: Разбор рациона с акцентом на цель. Объясняй физиологию (почему так) и дай решение (как исправить).
 
-Ответ на русском, markdown, эмодзи ок, но без лишнего.`;
+СТРУКТУРА ОТВЕТА (СТРОГО):
+**БЛОК 1: Вода и Фундамент**
+Кратко про воду и БЖУ. Если воды мало — объясни риск именно для цели (e.g., для ЖКТ — запоры).
+
+**БЛОК 2: Хронологический Разбор (Завтрак -> Обед -> Ужин)**
+Проходи по порядку.
+* Если прием БЫЛ: Оцени продукты для цели. Дай рекомендацию (Метод Двух Путей): Обычная еда vs Best&People.
+* Если ПРОПУЩЕН: Объясни риск для цели. Предложи решение.
+
+**БЛОК 3: Акцент на 16:00 (Полдник)**
+Если не было — почему важен.
+
+**БЛОК 4: Итог**
+Мотивация.
+
+ЗАПРЕТЫ: Нет списков продуктов/КБЖУ в тексте. Нет кодов ("lose"). Нет скобок [ ].
+
+ОТВЕТ НА РУССКОМ.`;
 }
 
 export default async function handler(req, res) {
@@ -105,38 +152,34 @@ export default async function handler(req, res) {
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-    if (req.method === 'OPTIONS') return res.status(200).end();
-    if (req.method !== 'POST') return res.status(405).json({ error: 'Only POST' });
+    if (req.method === 'OPTIONS') { res.status(200).end(); return; }
+    if (req.method !== 'POST') { res.status(405).json({ error: 'Only POST' }); return; }
 
     try {
         const apiKey = process.env.GEMINI_API_KEY;
-        if (!apiKey) throw new Error('Нет GEMINI_API_KEY');
-
+        if (!apiKey) throw new Error('GEMINI_API_KEY not found');
         const userData = req.body;
-        if (!userData?.dailyFact || !userData?.dailyTarget || !userData?.goal) {
-            return res.status(400).json({ error: 'Нет данных' });
+        if (!userData || !userData.dailyFact) {
+             res.status(400).json({ error: 'Invalid user data' });
+             return;
         }
 
-        const goalInfo = getGoalInfo(userData.goal);
         const mandatoryOpening = `Приветствую! На связи Андрей Солдатенко.
-Я проанализировал Ваш рацион с учетом Вашей цели: ${goalInfo.title}.`;
+Я проанализировал Ваш рацион с учетом Вашей цели.`;
 
-        const prompt = buildPrompt(userData);
+        const disclaimerBlock = `\n\n---\n**Важное примечание:** Данный разбор носит рекомендательный характер. При наличии заболеваний обязательно следуйте назначениям лечащего врача.`;
 
+        const analysisPrompt = buildAnalysisPrompt(userData);
         const genAI = new GoogleGenerativeAI(apiKey);
-        const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash-latest' });
+        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash-latest" });
 
-        const text = await callGeminiWithRetry(model, prompt);
-
-        // Дисклеймер приклеен в коде
-        const disclaimerBlock = `\n\n---\n\n**ВАЖНОЕ ПРИМЕЧАНИЕ:** Данные рекомендации основаны на анализе предоставленных Вами цифр и моем профессиональном опыте. Они носят информационный характер. Вы принимаете на себя полную ответственность за использование этой информации. Если у Вас имеются хронические заболевания или Вы принимаете лекарственные препараты, перед любыми изменениями в рационе обязательна консультация с Вашим лечащим врачом.`;
-
-        const fullText = mandatoryOpening + "\n\n" + text.trim() + disclaimerBlock;
+        const aiText = await callGeminiWithRetry(model, analysisPrompt, 6);
+        const fullText = mandatoryOpening + "\n\n" + aiText.trim() + disclaimerBlock;
 
         res.status(200).json({ text: fullText });
 
     } catch (error) {
-        console.error('Ошибка:', error.message);
-        res.status(500).json({ error: 'Не удалось сгенерировать' });
+        console.error('Error:', error.message);
+        res.status(500).json({ error: 'Generation failed' });
     }
 }
