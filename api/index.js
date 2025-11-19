@@ -6,7 +6,39 @@ export const config = {
     api: { bodyParser: true },
 };
 
-// --- Вспомогательная функция 1: Форматирование приемов пищи ---
+// --- (НОВОЕ) Функция задержки ---
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// --- (НОВОЕ) Функция "Агрессивного Дозвона" (Retry Logic) ---
+async function callGeminiWithRetry(model, prompt, retries = 6) {
+    // Начальная задержка 2 секунды. С каждой ошибкой будем ждать дольше.
+    let delay = 2000; 
+
+    for (let i = 0; i < retries; i++) {
+        try {
+            // Пытаемся получить ответ
+            const result = await model.generateContent(prompt);
+            return result.response.text();
+        } catch (err) {
+            // Проверяем, является ли ошибка перегрузкой (503) или лимитом (429)
+            const isOverloaded = err.message.includes('503') || err.message.includes('overloaded') || err.message.includes('429');
+            
+            if (isOverloaded) {
+                if (i === retries - 1) throw err; // Если это была последняя попытка — сдаемся
+                
+                console.warn(`Gemini 2.5 перегружен. Попытка ${i + 1} из ${retries}. Ждем ${delay}мс...`);
+                await sleep(delay);
+                delay *= 1.5; // Увеличиваем время ожидания в 1.5 раза
+                continue; // Идем на следующий круг цикла
+            }
+            
+            // Если ошибка другая (например, плохой ключ), выкидываем сразу
+            throw err; 
+        }
+    }
+}
+
+// --- Форматирование приемов пищи ---
 function formatMeals(meals) {
     if (!meals || Object.keys(meals).length === 0) {
         return 'Приемы пищи не добавлены.';
@@ -17,7 +49,6 @@ function formatMeals(meals) {
         mealSummary += `\n**${meal.name}:**\n`;
         if (meal.items && meal.items.length > 0) {
             meal.items.forEach(item => {
-                // Округление для красивого вывода
                 mealSummary += `- ${item.name} (${Math.round(item.grams)}г): К:${Math.round(item.calories)}, Б:${Math.round(item.proteins)}, Ж:${Math.round(item.fats)}, У:${Math.round(item.carbs)}\n`;
             });
         } else {
@@ -27,11 +58,12 @@ function formatMeals(meals) {
     return mealSummary;
 }
 
-// --- Вспомогательная функция 2: Сборка ПОЛНОГО промпта ---
+// --- Сборка ПОЛНОГО промпта ---
 function buildAnalysisPrompt(userData) {
     const { goal, dailyFact, dailyTarget, glHistory = {}, meals } = userData;
     const formattedMeals = formatMeals(meals);
 
+    // Расшифровка целей для нейросети
     const goalNames = {
         'lose': 'Снижение веса', 'maintain': 'Поддержание формы', 'gain': 'Набор массы',
         'athlete': 'Профессиональный спорт (Атлет)', 'diabetes1': 'Сахарный диабет 1 типа', 'diabetes2': 'Сахарный диабет 2 типа / ИР',
@@ -42,6 +74,7 @@ function buildAnalysisPrompt(userData) {
     };
     const userGoalName = goalNames[goal] || goal;
 
+    // Само тело инструкции
     return `[[1. РОЛЬ И СТИЛЬ]
 Ты - Андрей Солдатенко, нутрициолог (20 лет опыта), основатель Best&People.
 * **Стиль:** Наставник-партнер. Тон уважительный, поддерживающий, но экспертный. **ОБЯЗАТЕЛЬНОЕ ОБРАЩЕНИЕ К ПОЛЬЗОВАТЕЛЮ НА "ВЫ"**.
@@ -91,9 +124,9 @@ ${formattedMeals}
 * **IF 'app' (АПП) OR 'anticandida' (Кандида):**
     * **ОБЯЗАТЕЛЬНО СКАЖИ:** "На этом протоколе питание сильно ограничено. Именно для таких ситуаций я создал кашу **Detox Gentle (Яблочный пирог)**, когда сам проходил антипаразитарную программу. Это мой личный маст-хэв: она дает сытость, энергию и разрешена на протоколе. Рекомендую!"
 * **IF 'diabetes1' (СД 1 типа):**
-    * Акцент на подсчете углеводов. Упоминай термин **"Хлебная Единица (ХЕ)"**. Напомни, что продукты B&P имеют выверенное кол-во ХЕ, что упрощает жизнь.
+    * Акцент на подсчете углеводов. Упоминай термин **"Хлебная Единица (ХЕ)"**. Напомни, что продукты B&P имеют выверенное кол-во ХЕ.
 * **IF 'diabetes2' (СД 2 типа / ИР):**
-    * Твой фокус — **Гликемическая Нагрузка (ГН)**. Если ГН > 60, предупреди о скачках сахара. Рекомендуй *It's Fiber* и *Drain* для контроля глюкозы.
+    * Твой фокус — **Гликемическая Нагрузка (ГН)**. Если ГН > 60, предупреди о скачках сахара. Рекомендуй *It's Fiber* и *Drain*.
 * **IF 'no_gallbladder' OR 'gallstones' (Проблемы с желчным):**
     * Критично: **Дробное питание** (5-6 раз) и **Минимум жиров**. Рекомендуй Shape Smart Food и Пюре как легкие белковые приемы пищи, которые не нагружают печень.
 * **IF 'athlete' (Спорт):**
@@ -139,7 +172,7 @@ export default async function handler(req, res) {
             return;
         }
         
-        // 1. Создаем управляющие тексты для Приветствия
+        // Создаем управляющие тексты для Приветствия
         const goalNames = {
             'lose': 'Снижение веса', 'maintain': 'Поддержание формы', 'gain': 'Набор массы',
             'athlete': 'Профессиональный спорт (Атлет)', 'diabetes1': 'Сахарный диабет 1 типа', 'diabetes2': 'Сахарный диабет 2 типа / ИР',
@@ -150,38 +183,33 @@ export default async function handler(req, res) {
         };
         const userGoalName = goalNames[userData.goal] || userData.goal;
 
-        // Приветствие (Мандаторное начало)
+        // Приветствие и Дисклеймер (Собираются здесь, чтобы не было дублей от AI)
         const mandatoryOpening = `Привет! Я Андрей Солдатенко, нутрициолог с 20-летним опытом и основатель компании Best&People. Рад помочь Вам разобраться с Вашим рационом, используя мой личный опыт и новые технические возможности искусственного интеллекта. Ваша текущая цель — ${userGoalName}.`;
-
-        // Дисклеймер (Мандаторное окончание)
         const disclaimerBlock = `\n\n---\n\n**ВАЖНОЕ ПРИМЕЧАНИЕ:** Данные рекомендации основаны на анализе предоставленных Вами цифр и моем профессиональном опыте. Они носят информационный характер. Вы принимаете на себя полную ответственность за использование этой информации. Если у Вас имеются хронические заболевания или Вы принимаете лекарственные препараты, перед любыми изменениями в рационе обязательна консультация с Вашим лечащим врачом.`;
         
-        // 2. Генерируем только ТЕЛО АНАЛИЗА
+        // Генерируем тело
         const analysisPrompt = buildAnalysisPrompt(userData);
 
+        // Инициализация
         const genAI = new GoogleGenerativeAI(apiKey);
+        
+        // МЫ ОСТАВЛЯЕМ 2.5, КАК ВЫ И ХОТЕЛИ
         const model = genAI.getGenerativeModel({
             model: "gemini-2.5-flash" 
         });
 
-        // Отправляем тело промпта
-        const result = await model.generateContent(analysisPrompt);
-        const text = result.response.text().trim();
+        // ВЫЗЫВАЕМ ЧЕРЕЗ RETRY (Агрессивный дозвон)
+        const text = await callGeminiWithRetry(model, analysisPrompt, 6); // 6 попыток
 
-        // Если сработал Сценарий А (Голодовка), нейросеть может сама вернуть заголовок. 
-        // Проверим, не вернула ли она уже заголовок, чтобы не дублировать.
-        let finalText = text;
+        const finalText = text.trim();
         
-        // 3. Собираем ФИНАЛЬНЫЙ ответ (Приветствие + Анализ + Дисклеймер)
-        // ВАЖНО: Если это голодовка (Сценарий А), приветствие все равно уместно, 
-        // так как оно задает тон.
+        // Сборка
         const fullText = mandatoryOpening + "\n\n" + finalText + disclaimerBlock;
 
         res.status(200).json({ text: fullText });
 
     } catch (error) {
         console.error('Vercel Function Error:', error.message);
-        // В случае ошибки возвращаем 500 и сообщение об ошибке
         res.status(500).json({ error: 'Generation failed: ' + error.message });
     }
 }
