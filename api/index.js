@@ -1,6 +1,6 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
-// 1. ВАЖНО: Увеличиваем лимит, чтобы фотографии проходили на сервер
+// 1. Настройка лимитов
 export const config = {
     api: {
         bodyParser: {
@@ -13,17 +13,14 @@ export const config = {
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-// (ОБНОВЛЕНО) Функция теперь умеет принимать картинку (imagePart)
 async function callGeminiWithRetry(model, prompt, retries = 3, imagePart = null) {
     let delay = 2000;
     for (let i = 0; i < retries; i++) {
         try {
             let result;
             if (imagePart) {
-                // Если есть картинка, отправляем массив [промпт, картинка]
                 result = await model.generateContent([prompt, imagePart]);
             } else {
-                // Иначе только текст (как было раньше)
                 result = await model.generateContent(prompt);
             }
             return result.response.text();
@@ -36,7 +33,7 @@ async function callGeminiWithRetry(model, prompt, retries = 3, imagePart = null)
     }
 }
 
-// --- ВАШИ СТАРЫЕ ФУНКЦИИ (БЕЗ ИЗМЕНЕНИЙ) ---
+// --- ФУНКЦИИ ФОРМАТИРОВАНИЯ (ВАШИ, БЕЗ ИЗМЕНЕНИЙ) ---
 
 function formatMealsForAnalysis(meals) {
     if (!meals || typeof meals !== 'object') return 'Данные о приемах пищи отсутствуют (голод).';
@@ -83,7 +80,7 @@ function getGoalTitle(goalCode) {
     return goals[goalCode] || 'Снижение веса';
 }
 
-// --- ВАШ ПРОМПТ (БЕЗ ИЗМЕНЕНИЙ) ---
+// --- ВАШ ПРОМПТ ДЛЯ СОВЕТОВ (БЕЗ ИЗМЕНЕНИЙ) ---
 function buildAnalysisPrompt(userData) {
     const { goal, dailyFact, dailyTarget, meals } = userData;
     const goalTitle = getGoalTitle(goal);
@@ -190,7 +187,6 @@ ${mealsData}
 // --- 3. ОСНОВНОЙ ОБРАБОТЧИК ---
 
 export default async function handler(req, res) {
-    // Настройка CORS
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -209,13 +205,12 @@ export default async function handler(req, res) {
         if (!apiKey) throw new Error('Нет GEMINI_API_KEY');
 
         const genAI = new GoogleGenerativeAI(apiKey);
-        // Используем модель 2.5-flash
         const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
         const body = req.body;
 
         // =========================================================
-        // СЦЕНАРИЙ 1: АНАЛИЗ ФОТО (НОВАЯ ФУНКЦИЯ, ДОБАВЛЕНА)
+        // СЦЕНАРИЙ 1: АНАЛИЗ ФОТО (ИСПРАВЛЕННЫЙ ПРОМПТ: СТРОГО НА 100г)
         // =========================================================
         if (body.type === 'image_analysis' && body.image) {
             
@@ -227,28 +222,35 @@ export default async function handler(req, res) {
             };
 
             const photoPrompt = `
-            Ты — профессиональный диетолог. Посмотри на фото еды.
-            1. Определи, что это за блюдо/продукт.
-            2. Оцени примерный вес порции.
-            3. Рассчитай КБЖУ, Клетчатку и Гликемический Индекс (ГИ) НА ВСЮ ПОРЦИЮ.
+            Ты — профессиональный диетолог и калькулятор калорий.
+            Посмотри на фото.
             
-            Верни ответ СТРОГО в формате JSON (без markdown, просто текст JSON):
+            ИНСТРУКЦИЯ ПО АНАЛИЗУ:
+            1. Если на фото видна УПАКОВКА или ЭТИКЕТКА с текстом - ПРИОРИТЕТНО прочитай данные КБЖУ с неё (на 100г).
+            2. Если это просто блюдо - определи его состав.
+            
+            ГЛАВНАЯ ЗАДАЧА:
+            Рассчитай/Найди КБЖУ (Калории, Белки, Жиры, Углеводы), Клетчатку и ГИ СТРОГО НА 100 ГРАММ ПРОДУКТА.
+            
+            ВНИМАНИЕ! Не считай калорийность всей порции на тарелке! Мне нужны удельные значения на 100г.
+            
+            Верни ответ СТРОГО в формате JSON (без markdown):
             {
                 "name": "Название блюда (кратко)",
-                "calories": 0, // калории (число)
-                "proteins": 0.0, // белки (число)
-                "fats": 0.0, // жиры (число)
-                "carbs": 0.0, // углеводы (число)
-                "fiber": 0.0, // клетчатка (число)
-                "gi": 0 // гликемический индекс (число 0-100)
+                "calories": 0, // на 100г
+                "proteins": 0.0, // на 100г
+                "fats": 0.0, // на 100г
+                "carbs": 0.0, // на 100г
+                "fiber": 0.0, // на 100г (примерно, если нет данных)
+                "gi": 0 // гликемический индекс
             }
-            Если на фото нет еды или её невозможно распознать, верни JSON с name: "Не удалось распознать еду" и нулями.
+            Если продукт не распознан, верни JSON с name: "Не удалось распознать".
             `;
 
-            // Вызываем Gemini с картинкой
+            // Вызываем Gemini
             const jsonText = await callGeminiWithRetry(model, photoPrompt, 3, imagePart);
             
-            // Чистим ответ от Markdown (```json ... ```)
+            // Чистим ответ
             const cleanJson = jsonText.replace(/```json|```/g, '').trim();
             
             res.status(200).json({ text: cleanJson });
@@ -268,7 +270,6 @@ export default async function handler(req, res) {
 
             const analysisPrompt = buildAnalysisPrompt(userData);
             
-            // Запускаем Gemini с текстом
             const aiText = await callGeminiWithRetry(model, analysisPrompt, 6);
 
             const fullText = mandatoryOpening + "\n\n" + aiText.trim() + disclaimerBlock;
@@ -277,7 +278,6 @@ export default async function handler(req, res) {
             return;
         }
 
-        // Если ничего не совпало
         res.status(400).json({ error: 'Нет данных или некорректный формат' });
 
     } catch (error) {
