@@ -1,21 +1,33 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
 export const config = {
-    api: { bodyParser: true },
+    api: {
+        bodyParser: {
+            sizeLimit: '4mb', // Увеличиваем лимит для картинок
+        },
+    },
 };
 
 // --- 1. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-async function callGeminiWithRetry(model, prompt, retries = 3) {
+// (ОБНОВЛЕНО) Функция теперь умеет принимать картинку (imagePart)
+async function callGeminiWithRetry(model, prompt, retries = 3, imagePart = null) {
     let delay = 2000;
     for (let i = 0; i < retries; i++) {
         try {
-            const result = await model.generateContent(prompt);
+            let result;
+            if (imagePart) {
+                // Если есть картинка, отправляем её вместе с промптом
+                result = await model.generateContent([prompt, imagePart]);
+            } else {
+                // Иначе только текст
+                result = await model.generateContent(prompt);
+            }
             return result.response.text();
         } catch (err) {
-            console.warn(`Gemini 503/Overloaded. Попытка ${i + 1}/${retries}`);
+            console.warn(`Gemini Error (Attempt ${i + 1}/${retries}):`, err.message);
             if (i === retries - 1) throw err;
             await sleep(delay);
             delay *= 1.5;
@@ -68,7 +80,7 @@ function getGoalTitle(goalCode) {
     return goals[goalCode] || 'Снижение веса';
 }
 
-// --- 2. ГЕНЕРАЦИЯ ПРОМПТА (ВЕРСИЯ 11.0 - NO ABBREVIATIONS) ---
+// --- ВАШ ОРИГИНАЛЬНЫЙ ПРОМТ (ВОССТАНОВЛЕН) ---
 function buildAnalysisPrompt(userData) {
     const { goal, dailyFact, dailyTarget, meals } = userData;
     const goalTitle = getGoalTitle(goal);
@@ -172,9 +184,10 @@ ${mealsData}
 `;
 }
 
-// --- 3. ОСНОВНОЙ ОБРАБОТЧИК ---
+// --- 3. ОСНОВНОЙ ОБРАБОТЧИК (ОБНОВЛЕННЫЙ) ---
 
 export default async function handler(req, res) {
+    // Настройка CORS
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -192,29 +205,78 @@ export default async function handler(req, res) {
         const apiKey = process.env.GEMINI_API_KEY;
         if (!apiKey) throw new Error('Нет GEMINI_API_KEY');
 
-        const userData = req.body;
-        if (!userData || !userData.dailyFact || !userData.goal) {
-            return res.status(400).json({ error: 'Нет данных или некорректный формат' });
+        const genAI = new GoogleGenerativeAI(apiKey);
+        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+        const body = req.body;
+
+        // === СЦЕНАРИЙ 1: АНАЛИЗ ФОТО (НОВАЯ ЧАСТЬ) ===
+        if (body.type === 'image_analysis' && body.image) {
+            
+            const imagePart = {
+                inlineData: {
+                    data: body.image,
+                    mimeType: "image/jpeg",
+                },
+            };
+
+            const photoPrompt = `
+            Ты — профессиональный диетолог и калькулятор калорий.
+            Посмотри на фото еды.
+            1. Определи, что это за блюдо/продукт.
+            2. Оцени примерный вес порции (если видно тарелку, считай стандартную порцию 200-300г, если это штучный товар - оцени вес).
+            3. Рассчитай КБЖУ, Клетчатку и Гликемический Индекс (ГИ) НА ВСЮ ПОРЦИЮ (исходя из твоего оценки веса).
+            
+            Верни ответ СТРОГО в формате JSON (без markdown, просто текст JSON):
+            {
+                "name": "Название блюда (кратко)",
+                "calories": 0, // калории (число)
+                "proteins": 0.0, // белки (число)
+                "fats": 0.0, // жиры (число)
+                "carbs": 0.0, // углеводы (число)
+                "fiber": 0.0, // клетчатка (число)
+                "gi": 0 // гликемический индекс (число 0-100)
+            }
+            Если на фото нет еды или её невозможно распознать, верни JSON с name: "Не удалось распознать еду" и нулями.
+            `;
+
+            // Вызываем Gemini с картинкой
+            const jsonText = await callGeminiWithRetry(model, photoPrompt, 3, imagePart);
+            
+            // Чистим ответ от ```json
+            const cleanJson = jsonText.replace(/```json|```/g, '').trim();
+            
+            res.status(200).json({ text: cleanJson });
+            return;
         }
 
-        const goalTitle = getGoalTitle(userData.goal);
-        
-        const mandatoryOpening = `👋 **Приветствую! На связи Андрей Солдатенко.**\n\nЯ проанализировал Ваш рацион с учетом Вашей цели: **${goalTitle}**.\nДавайте посмотрим, как Ваш организм реагирует на то топливо, которое Вы ему даете 🔋.`;
-        
-        const disclaimerBlock = `\n\n------------------\n⚠️ **ВАЖНОЕ ПРИМЕЧАНИЕ:**\nДанные рекомендации основаны на анализе предоставленных Вами цифр и моем профессиональном опыте. Они носят информационный характер.\nВы принимаете на себя полную ответственность за использование этой информации.\nЕсли у Вас имеются хронические заболевания или Вы принимаете лекарственные препараты, перед любыми изменениями в рационе обязательна консультация с Вашим лечащим врачом.`;
+        // === СЦЕНАРИЙ 2: АНАЛИЗ РАЦИОНА (ВАШ СТАРЫЙ ФУНКЦИОНАЛ) ===
+        if (body.dailyFact && body.goal) {
+            const goalTitle = getGoalTitle(body.goal);
+            
+            // Формируем приветствие (как было)
+            const mandatoryOpening = `👋 **Приветствую! На связи Андрей Солдатенко.**\n\nЯ проанализировал Ваш рацион с учетом Вашей цели: **${goalTitle}**.\nДавайте посмотрим, как Ваш организм реагирует на то топливо, которое Вы ему даете 🔋.`;
+            
+            // Формируем дисклеймер (как было)
+            const disclaimerBlock = `\n\n------------------\n⚠️ **ВАЖНОЕ ПРИМЕЧАНИЕ:**\nДанные рекомендации основаны на анализе предоставленных Вами цифр и моем профессиональном опыте. Они носят информационный характер.\nВы принимаете на себя полную ответственность за использование этой информации.\nЕсли у Вас имеются хронические заболевания или Вы принимаете лекарственные препараты, перед любыми изменениями в рационе обязательна консультация с Вашим лечащим врачом.`;
 
-        const analysisPrompt = buildAnalysisPrompt(userData);
-        const genAI = new GoogleGenerativeAI(apiKey);
-        const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+            // Строим ВАШ оригинальный промт
+            const analysisPrompt = buildAnalysisPrompt(body);
 
-        const aiText = await callGeminiWithRetry(model, analysisPrompt, 6);
-        
-        const fullText = mandatoryOpening + "\n\n" + aiText.trim() + disclaimerBlock;
+            // Получаем ответ от ИИ (только текст)
+            const aiText = await callGeminiWithRetry(model, analysisPrompt, 6);
+            
+            // Собираем всё вместе
+            const fullText = mandatoryOpening + "\n\n" + aiText.trim() + disclaimerBlock;
 
-        res.status(200).json({ text: fullText });
+            res.status(200).json({ text: fullText });
+            return;
+        }
+
+        res.status(400).json({ error: 'Некорректный запрос' });
 
     } catch (error) {
         console.error('Server Error:', error.message);
-        res.status(500).json({ error: 'Ошибка генерации совета.' });
+        res.status(500).json({ error: 'Ошибка сервера.' });
     }
 }
